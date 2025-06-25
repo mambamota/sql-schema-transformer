@@ -1,0 +1,149 @@
+-- 🟡 MANUAL Cash Forecast (via App Composer)
+SELECT
+    TRUNC(CFL.EXTN_ATTRIBUTE_TIMESTAMP001) AS forecast_date,
+    CFL.CURRENCY_CODE AS currency,
+    NVL(CFL.EXTN_ATTRIBUTE_NUMBER006, 0) AS inflow_amount,                                -- CashInflow_c
+    NVL(CFL.EXTN_ATTRIBUTE_NUMBER007, 0) AS outflow_amount,                               -- CashOutflow_c
+    NVL(CFL.EXTN_ATTRIBUTE_NUMBER006, 0) - NVL(CFL.EXTN_ATTRIBUTE_NUMBER007, 0) AS net_cash_flow,
+    'Manual' AS source,
+    NULL AS bu_id,
+    -- Optional: Metadata from lines/plans
+    CFL.EXTN_ATTRIBUTE_CHAR008 AS bank_account,                                           -- BankAccount_c
+    CFL.EXTN_ATTRIBUTE_CHAR009 AS transaction_type,                                       -- TransactionType_c
+    CFL.EXTN_ATTRIBUTE_CHAR007 AS line_type,                                              -- LineType_c
+    CFL.EXTN_ATTRIBUTE_CHAR006 AS description,                                            -- Description_c
+    CFL.EXTN_ATTRIBUTE_NUMBER001 AS forecast_plan_id,                                     -- CashForecast_Id_c
+    CFP.EXTN_ATTRIBUTE_CHAR006 AS forecast_name,                                          -- ForecastName_c
+    CFP.EXTN_ATTRIBUTE_CHAR007 AS forecast_type,                                          -- ForecastType_c
+    CFP.EXTN_ATTRIBUTE_TIMESTAMP001 AS plan_start_date,                                   -- StartDate_c
+    CFP.EXTN_ATTRIBUTE_TIMESTAMP002 AS plan_end_date                                      -- EndDate_c
+FROM
+    ZCA_REF_ENTITIES CFL
+    JOIN ZCA_REF_ENTITIES CFP ON CFL.EXTN_ATTRIBUTE_NUMBER001 = CFP.ID
+WHERE
+    CFL.ATTRIBUTE_CATEGORY = 'CashForecastLine_c'
+    AND CFP.ATTRIBUTE_CATEGORY = 'CashForecast_c'
+    AND CFL.EXTN_ATTRIBUTE_TIMESTAMP001 BETWEEN TRUNC(SYSDATE) AND TRUNC(SYSDATE + :P_Number_of_Day)
+
+UNION ALL
+
+-- 🟢 AR: Past Due Receipts
+SELECT
+    TRUNC(SYSDATE) AS forecast_date,
+    rcta.invoice_currency_code AS currency,
+    SUM(aps.amount_due_remaining) AS inflow_amount,
+    0 AS outflow_amount,
+    SUM(aps.amount_due_remaining) AS net_cash_flow,
+    'AR' AS source,
+    MAX(rcta.org_id) AS bu_id,
+    NULL AS bank_account,
+    NULL AS transaction_type,
+    NULL AS line_type,
+    NULL AS description,
+    NULL AS forecast_plan_id,
+    NULL AS forecast_name,
+    NULL AS forecast_type,
+    NULL AS plan_start_date,
+    NULL AS plan_end_date
+FROM
+    ra_customer_trx_all rcta
+    JOIN ar_payment_schedules_all aps ON rcta.customer_trx_id = aps.customer_trx_id
+WHERE
+    aps.due_date < TRUNC(SYSDATE)
+    AND aps.due_date >= TO_DATE('1951-01-01', 'YYYY-MM-DD')
+    AND aps.amount_due_remaining > 0
+    AND rcta.complete_flag = 'Y'
+GROUP BY
+    rcta.invoice_currency_code
+
+UNION ALL
+
+-- 🟢 AR: Future Receipts
+SELECT
+    TRUNC(aps.due_date) AS forecast_date,
+    rcta.invoice_currency_code AS currency,
+    SUM(aps.amount_due_remaining) AS inflow_amount,
+    0 AS outflow_amount,
+    SUM(aps.amount_due_remaining) AS net_cash_flow,
+    'AR' AS source,
+    MAX(rcta.org_id) AS bu_id,
+    NULL AS bank_account,
+    NULL AS transaction_type,
+    NULL AS line_type,
+    NULL AS description,
+    NULL AS forecast_plan_id,
+    NULL AS forecast_name,
+    NULL AS forecast_type,
+    NULL AS plan_start_date,
+    NULL AS plan_end_date
+FROM
+    ra_customer_trx_all rcta
+    JOIN ar_payment_schedules_all aps ON rcta.customer_trx_id = aps.customer_trx_id
+WHERE
+    aps.due_date BETWEEN TRUNC(SYSDATE) AND TRUNC(SYSDATE + :P_Number_of_Day)
+    AND aps.amount_due_remaining > 0
+    AND rcta.complete_flag = 'Y'
+GROUP BY
+    TRUNC(aps.due_date), rcta.invoice_currency_code
+
+UNION ALL
+
+-- 🔴 AP: Past Due Payments
+SELECT
+    TRUNC(SYSDATE) AS forecast_date,
+    ai.invoice_currency_code AS currency,
+    0 AS inflow_amount,
+    SUM(aps.amount_remaining) AS outflow_amount,
+    -SUM(aps.amount_remaining) AS net_cash_flow,
+    'AP' AS source,
+    MAX(ai.org_id) AS bu_id,
+    NULL AS bank_account,
+    NULL AS transaction_type,
+    NULL AS line_type,
+    NULL AS description,
+    NULL AS forecast_plan_id,
+    NULL AS forecast_name,
+    NULL AS forecast_type,
+    NULL AS plan_start_date,
+    NULL AS plan_end_date
+FROM
+    ap_invoices_all ai
+    JOIN ap_payment_schedules_all aps ON ai.invoice_id = aps.invoice_id
+WHERE
+    aps.due_date < TRUNC(SYSDATE)
+    AND aps.due_date >= TO_DATE('1951-01-01', 'YYYY-MM-DD')
+    AND aps.amount_remaining > 0
+GROUP BY
+    ai.invoice_currency_code
+
+UNION ALL
+
+-- 🔴 AP: Future Payments
+SELECT
+    TRUNC(aps.due_date) AS forecast_date,
+    ai.invoice_currency_code AS currency,
+    0 AS inflow_amount,
+    SUM(aps.amount_remaining) AS outflow_amount,
+    -SUM(aps.amount_remaining) AS net_cash_flow,
+    'AP' AS source,
+    MAX(ai.org_id) AS bu_id,
+    NULL AS bank_account,
+    NULL AS transaction_type,
+    NULL AS line_type,
+    NULL AS description,
+    NULL AS forecast_plan_id,
+    NULL AS forecast_name,
+    NULL AS forecast_type,
+    NULL AS plan_start_date,
+    NULL AS plan_end_date
+FROM
+    ap_invoices_all ai
+    JOIN ap_payment_schedules_all aps ON ai.invoice_id = aps.invoice_id
+WHERE
+    aps.due_date BETWEEN TRUNC(SYSDATE) AND TRUNC(SYSDATE + :P_Number_of_Day)
+    AND aps.amount_remaining > 0
+GROUP BY
+    TRUNC(aps.due_date), ai.invoice_currency_code
+
+ORDER BY
+    forecast_date, currency, source

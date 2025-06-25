@@ -1,0 +1,7 @@
+I want to create a python streamlit or gradio interface app that will be in final deployed in hugging face space in order to be used by other collegues.
+the objective of the app is to 
+-import and read excel file that contains old table schema structure (like ConfigurationReport-24 Old.xlsx)  for few tables
+-import and read excel file that contains new table schema structure (like ConfigurationReport-23 New.xlsx)
+- for both file structure, tables informations are in sheets that have name ending by _c
+- the tables informations   about fields are contained starting from the row under the row containing the key word 'Custom Fields'
+- the objective is to  transform an existing (entered on the interface by the user) sql query based on old structure , into a new query based on the new structure.

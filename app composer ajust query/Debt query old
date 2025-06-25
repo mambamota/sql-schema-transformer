@@ -1,0 +1,97 @@
+WITH PaymentSchedule AS (
+    SELECT
+        MRE.ID AS Loan_Id,
+        MRE.RECORD_NAME AS Debt_ID,
+        MRE.CREATION_DATE AS Creation_Date,
+        MRE.EXTN_ATTRIBUTE_NUMBER008 AS Coupon_Rate,        
+        MRE.EXTN_ATTRIBUTE_NUMBER006 AS Loan_Amount,
+        MRE.EXTN_ATTRIBUTE_TIMESTAMP001 AS Start_Date,
+        MRE.EXTN_ATTRIBUTE_TIMESTAMP002 AS End_Date,
+        TO_DATE('1999-09-05', 'YYYY-MM-DD') AS First_Payment,
+        TO_DATE('2000-03-05', 'YYYY-MM-DD') AS Second_Payment,
+        MRE.EXTN_ATTRIBUTE_CHAR006 AS Description
+    FROM MKT_REF_ENTITIES MRE
+    WHERE MRE.ATTRIBUTE_CATEGORY = 'DebtManagement_c'
+),
+Payment(Payment_Number, Debt_ID, Loan_Id, Start_Period, End_Period, Interest, Interest_Payment, Description) AS (
+    SELECT
+        1 AS Payment_Number,
+        PS.Debt_ID,
+        PS.Loan_Id,
+        PS.Start_Date,
+        CASE
+            WHEN TRUNC(LAST_DAY(PS.Start_Date)) > TRUNC(PS.End_Date) THEN TRUNC(PS.End_Date)
+            ELSE TRUNC(LAST_DAY(PS.Start_Date))
+        END,
+        ROUND(PS.Loan_Amount * PS.Coupon_Rate / 365 *
+            CASE
+                WHEN TRUNC(LAST_DAY(PS.Start_Date)) > TRUNC(PS.End_Date) THEN TRUNC(PS.End_Date) - TRUNC(PS.Start_Date)
+                ELSE TRUNC(LAST_DAY(PS.Start_Date)) - TRUNC(PS.Start_Date)
+            END, 0) / 100,
+        CASE 
+            WHEN EXTRACT(YEAR FROM TRUNC(PS.First_Payment)) = EXTRACT(YEAR FROM TRUNC(PS.Start_Date)) 
+                 AND EXTRACT(MONTH FROM TRUNC(PS.First_Payment)) = EXTRACT(MONTH FROM TRUNC(PS.Start_Date)) 
+            THEN ROUND(PS.Loan_Amount * PS.Coupon_Rate * (TRUNC(PS.Start_Date) - TRUNC(PS.First_Payment)) / 365 / 100, 0) 
+            ELSE 0
+        END,
+        PS.Description
+    FROM PaymentSchedule PS
+
+    UNION ALL
+
+    SELECT
+        P.Payment_Number + 1,
+        PS.Debt_ID,
+        PS.Loan_Id,
+        P.End_Period,
+        CASE
+            WHEN TRUNC(LAST_DAY(P.End_Period + 1)) > TRUNC(End_Date) THEN TRUNC(End_Date)
+            ELSE TRUNC(LAST_DAY(P.End_Period + 1))
+        END,
+        ROUND(PS.Loan_Amount * PS.Coupon_Rate / 365 * 
+            CASE 
+                WHEN TRUNC(LAST_DAY(P.End_Period + INTERVAL '1' DAY)) > TRUNC(End_Date) THEN TRUNC(End_Date) - TRUNC(P.End_Period)
+                ELSE TRUNC(LAST_DAY(P.End_Period + INTERVAL '1' DAY)) - TRUNC(P.End_Period)
+            END, 0) / 100,
+        CASE 
+            WHEN EXTRACT(YEAR FROM TRUNC(PS.First_Payment)) = EXTRACT(YEAR FROM TRUNC(P.End_Period))
+                 AND EXTRACT(MONTH FROM TRUNC(PS.First_Payment)) = EXTRACT(MONTH FROM TRUNC(P.End_Period)) 
+            THEN ROUND(PS.Loan_Amount * PS.Coupon_Rate * (TRUNC(PS.Start_Date) - TRUNC(PS.First_Payment)) / 365 / 100, 0)
+
+            WHEN EXTRACT(MONTH FROM TRUNC(PS.First_Payment)) = EXTRACT(MONTH FROM TRUNC(P.End_Period)) 
+                 OR (EXTRACT(MONTH FROM TRUNC(PS.Second_Payment)) = EXTRACT(MONTH FROM TRUNC(P.End_Period)) 
+                     AND P.Start_Period > TRUNC(PS.First_Payment))
+            THEN ROUND((PS.Loan_Amount * PS.Coupon_Rate / 100 / 2), 0) 
+
+            ELSE 0
+        END,
+        PS.Description
+    FROM Payment P
+    JOIN PaymentSchedule PS ON P.Loan_Id = PS.Loan_Id
+    WHERE P.End_Period < PS.End_Date
+)
+CYCLE Payment_Number SET cycle TO 1 DEFAULT 0
+
+SELECT
+    TRUNC(End_Period) AS forecast_date,
+    'CAD' AS currency,  -- Adjust if multi-currency needed
+    0 AS inflow_amount,
+    Interest_Payment AS outflow_amount,
+    -Interest_Payment AS net_cash_flow,
+    'Debt' AS source,
+    NULL AS bu_id,
+    NULL AS bank_account,
+    NULL AS transaction_type,
+    NULL AS line_type,
+    Description AS description,
+    Loan_Id AS forecast_plan_id,
+    Debt_ID AS forecast_name,
+    'FixedInterest' AS forecast_type,
+    NULL AS plan_start_date,
+    NULL AS plan_end_date
+FROM
+    Payment
+WHERE
+    Interest_Payment IS NOT NULL
+    AND Interest_Payment <> 0
+    AND End_Period BETWEEN TRUNC(:P_Forecast_Start_Date) AND TRUNC(:P_Forecast_Start_Date + :P_Number_of_Day)
