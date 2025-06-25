@@ -14,7 +14,7 @@ A Streamlit web app to help you transform SQL queries from an old table schema t
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/mambamota/sql-schema-transformer.git
+   git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
    cd "app composer ajust query"
    ```
 
