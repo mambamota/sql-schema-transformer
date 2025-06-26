@@ -175,15 +175,23 @@ def build_full_mapping_filtered(detected_table_columns, old_schema, new_schema):
     for table_name in relevant_old_tables:
         columns_in_query = detected_table_columns[table_name]
         old_object = find_best_object_for_table(table_name, columns_in_query, old_schema)
-        new_object = find_best_object_for_table(table_name, columns_in_query, new_schema)
+        # Prefer to map to the same object name in new schema if it exists
+        new_object = None
+        if old_object and old_object in new_schema:
+            new_object = old_object
+        else:
+            new_object = find_best_object_for_table(table_name, columns_in_query, new_schema)
         if not old_object or not new_object:
             continue
-        table_map[old_object] = new_object
-        relevant_objects.add(old_object)
+        # Map old table name to new table name using object name as the link
+        old_table = old_schema[old_object]['table_name']
+        new_table = new_schema[new_object]['table_name']
+        table_map[old_table] = new_table
+        relevant_objects.add(old_table)
         # Get all old fields (dicts) for this object
         old_fields = [f for f in old_schema[old_object]['fields'] if f.get('Column Name') and f.get('Column Name') in columns_in_query]
         new_fields = [f for f in new_schema[new_object]['fields'] if f.get('Column Name')]
-        column_maps[old_object] = map_columns_for_table(old_fields, new_fields)
+        column_maps[old_table] = map_columns_for_table(old_fields, new_fields)
     return table_map, column_maps, relevant_objects
 
 def transform_query_full(query, table_map, column_maps):
