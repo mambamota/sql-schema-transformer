@@ -36,7 +36,7 @@ def extract_schema_from_excel(file, min_fields=1):
         header_idx = custom_fields_row_idx[0] + 1
         if header_idx >= len(df):
             continue
-        header = df.iloc[header_idx].fillna('').astype(str).str.strip().tolist()
+        header = [str(h).strip() for h in df.iloc[header_idx].fillna('').astype(str).tolist()]
         # Extract field info from the next rows (stop at first empty row)
         fields = []
         for i in range(header_idx + 1, len(df)):
@@ -44,15 +44,19 @@ def extract_schema_from_excel(file, min_fields=1):
             if row.isnull().all() or (row.astype(str) == '').all():
                 break
             field_info = {header[j]: str(row.iloc[j]).strip() for j in range(min(len(header), len(row)))}
-            if field_info.get('Column Name'):  # Only add if 'Column Name' is not empty
+            col_name = field_info.get('Column Name')
+            if col_name is not None and col_name.strip():  # Only add if 'Column Name' is not empty
+                # Trim all keys and values
+                field_info = {k.strip(): v.strip() for k, v in field_info.items()}
                 fields.append(field_info)
         if len(fields) >= min_fields:
-            schema[table_name] = fields
+            schema[table_name.strip()] = fields
     return schema
 
 def build_schema_dict(schema):
     """
     Returns dict: {table: set(columns)} for easier lookup.
+    Trims whitespace from table and column names.
     """
     table_columns = {}
     for table, fields in schema.items():
@@ -60,8 +64,8 @@ def build_schema_dict(schema):
         for f in fields:
             col = f.get('Column Name')
             if col:
-                columns.add(col)
-        table_columns[table] = columns
+                columns.add(col.strip())
+        table_columns[table.strip()] = columns
     return table_columns
 
 def extract_tables_and_columns_from_query(query):
@@ -161,26 +165,26 @@ def transform_query_full(query, table_map, column_maps):
 def extract_table_aliases_and_columns(query):
     """
     Extracts table/alias pairs and maps columns to their real tables from a SQL query.
-    Returns: {real_table: set(columns_used)}
+    Trims whitespace from all names. Returns: {real_table: set(columns_used)}
     """
     # 1. Find all table/alias pairs in FROM and JOIN clauses
     table_alias_pattern = re.compile(r'(FROM|JOIN)\s+([\w]+)\s+([\w]+)', re.IGNORECASE)
     alias_to_table = {}
     for match in table_alias_pattern.finditer(query):
-        real_table = match.group(2)
-        alias = match.group(3)
+        real_table = match.group(2).strip()
+        alias = match.group(3).strip()
         alias_to_table[alias] = real_table
         alias_to_table[real_table] = real_table  # allow direct table usage too
     # 2. Find all qualified column references (alias.column)
     qualified_col_pattern = re.compile(r'([\w]+)\.([\w]+)')
     table_columns = {}
     for match in qualified_col_pattern.finditer(query):
-        alias = match.group(1)
-        col = match.group(2)
+        alias = match.group(1).strip()
+        col = match.group(2).strip()
         real_table = alias_to_table.get(alias)
         if real_table:
             table_columns.setdefault(real_table, set()).add(col)
-    return table_columns
+    return {k.strip(): {c.strip() for c in v} for k, v in table_columns.items()}
 
 # --- Streamlit UI ---
 st.sidebar.header("1. Upload Schema Files")
@@ -202,7 +206,7 @@ if old_file and new_file:
             # Detect tables/columns used in query (robust alias-aware)
             detected_table_columns = extract_table_aliases_and_columns(old_query)
             st.write("#### Detected Tables and Columns (by robust alias extraction):")
-            st.json({k: list(v) for k, v in detected_table_columns.items()})
+            st.json(detected_table_columns)
             # Build mapping
             table_map, column_maps, relevant_old_tables, relevant_used_columns = build_full_mapping(old_query, old_schema, new_schema)
             st.write("#### Table Mapping:")
