@@ -261,89 +261,100 @@ if old_file and new_file:
         st.write("### New Schema Tables:", list(new_schema.keys()))
         st.header("2. Paste Old SQL Query")
         old_query = st.text_area("Paste your old SQL query here:", height=200)
-        if old_query.strip():
-            # Detect tables/columns used in query (robust alias-aware, only real tables)
+        apply_query = st.button("Apply Query")
+        # Use session_state to store mapping/results
+        if 'old_query' not in st.session_state:
+            st.session_state['old_query'] = ''
+        if 'table_map' not in st.session_state:
+            st.session_state['table_map'] = None
+        if 'column_maps' not in st.session_state:
+            st.session_state['column_maps'] = None
+        if 'relevant_old_tables' not in st.session_state:
+            st.session_state['relevant_old_tables'] = None
+        if 'filtered_detected_table_columns' not in st.session_state:
+            st.session_state['filtered_detected_table_columns'] = None
+        # If query or schema changes, reset session_state
+        if old_query != st.session_state['old_query']:
+            st.session_state['table_map'] = None
+            st.session_state['column_maps'] = None
+            st.session_state['relevant_old_tables'] = None
+            st.session_state['filtered_detected_table_columns'] = None
+        if apply_query:
             detected_table_columns = extract_table_aliases_and_columns(old_query, old_schema)
-            # Only keep tables that are present in the schema (real tables)
             real_tables = {obj['table_name'] for obj in old_schema.values()}
             filtered_detected_table_columns = {k: v for k, v in detected_table_columns.items() if k in real_tables}
-            st.write("#### Detected Tables and Columns (by robust alias extraction, filtered to real tables):")
-            st.json(filtered_detected_table_columns)
-            # Build mapping using only real tables
             table_map, column_maps, relevant_old_tables = build_full_mapping_filtered(filtered_detected_table_columns, old_schema, new_schema)
+            st.session_state['old_query'] = old_query
+            st.session_state['table_map'] = table_map
+            st.session_state['column_maps'] = column_maps
+            st.session_state['relevant_old_tables'] = relevant_old_tables
+            st.session_state['filtered_detected_table_columns'] = filtered_detected_table_columns
+        # Show mapping/results if available
+        if st.session_state['table_map'] and st.session_state['column_maps'] and st.session_state['relevant_old_tables']:
+            st.write("#### Detected Tables and Columns:")
+            st.json(st.session_state['filtered_detected_table_columns'])
             st.write("#### Table Mapping:")
-            st.json(table_map)
+            st.json(st.session_state['table_map'])
             st.write("#### Column Mapping (per table):")
-            st.json(column_maps)
-            # Show mapping summary
-            for old_table in relevant_old_tables:
-                st.write(f"##### Mapping for Table: {old_table} → {table_map[old_table]}")
+            st.json(st.session_state['column_maps'])
+            for old_table in st.session_state['relevant_old_tables']:
+                st.write(f"##### Mapping for Table: {old_table} → {st.session_state['table_map'][old_table]}")
                 mapping_df = pd.DataFrame({
-                    'Old Column Name': list(column_maps[old_table].keys()),
-                    'New Column Name': list(column_maps[old_table].values())
+                    'Old Column Name': list(st.session_state['column_maps'][old_table].keys()),
+                    'New Column Name': list(st.session_state['column_maps'][old_table].values())
                 })
                 st.dataframe(mapping_df)
-            # Transform query
+            # Transform query button
+            if 'new_query' not in st.session_state:
+                st.session_state['new_query'] = None
             if st.button("Transform Query"):
-                new_query = transform_query_full(old_query, table_map, column_maps)
+                st.session_state['new_query'] = transform_query_full(st.session_state['old_query'], st.session_state['table_map'], st.session_state['column_maps'])
+            if st.session_state['new_query']:
+                new_query = st.session_state['new_query']
                 st.header("3. Transformed SQL Query")
                 st.code(new_query, language="sql")
                 st.download_button("Download New Query", new_query, file_name="transformed_query.sql")
                 # Side-by-side full queries with perfect formatting and syntax highlighting
-                st.header("5. Side-by-Side Full Queries (SQL Syntax Highlighting)")
-                formatted_old_query = sqlparse.format(old_query, reindent=True, keyword_case='upper')
-                formatted_new_query = sqlparse.format(new_query, reindent=True, keyword_case='upper')
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Old Query**")
-                    st.code(formatted_old_query, language="sql")
-                with col2:
-                    st.markdown("**New Query**")
-                    st.code(formatted_new_query, language="sql")
-                # Custom HTML block with line numbers and inline color highlighting for differences
                 st.header("6. Side-by-Side Diff with Line Numbers and Highlighting")
+                formatted_old_query = sqlparse.format(st.session_state['old_query'], reindent=True, keyword_case='upper')
+                formatted_new_query = sqlparse.format(new_query, reindent=True, keyword_case='upper')
                 old_lines = formatted_old_query.splitlines()
                 new_lines = formatted_new_query.splitlines()
                 max_lines = max(len(old_lines), len(new_lines))
-                html = '<div style="display: flex; gap: 32px;">'
-                # Old Query Column
-                html += '<div><b>Old Query</b><pre style="font-size:13px; background:#f8f8f8; padding:8px;">'
+                html = (
+                    "<style>"
+                    ".diff-table { border-collapse: collapse; width: 100%; }"
+                    ".diff-table th, .diff-table td { border: 1px solid #ddd; padding: 4px 8px; font-size: 13px; }"
+                    ".diff-table th { background: #f4f4f4; }"
+                    ".diff-table td { vertical-align: top; font-family: monospace; }"
+                    "</style>"
+                    "<table class=\'diff-table\'>"
+                    "<tr><th>Old #</th><th>Old Query</th><th>New #</th><th>New Query</th></tr>"
+                )
                 for i in range(max_lines):
                     old_line = old_lines[i] if i < len(old_lines) else ''
                     new_line = new_lines[i] if i < len(new_lines) else ''
                     matcher = SequenceMatcher(None, old_line, new_line)
-                    old_out = ''
+                    old_out, new_out = '', ''
                     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                        text = old_line[i1:i2]
+                        old_text = old_line[i1:i2]
+                        new_text = new_line[j1:j2]
                         if tag == 'equal':
-                            old_out += text
-                        else:
-                            old_out += f'<span style="background-color:#ffcccc">{text}</span>' if text else ''
-                    html += f'<span style="color:#888">{i+1:>3} </span>{old_out}\n'
-                html += '</pre></div>'
-                # New Query Column
-                html += '<div><b>New Query</b><pre style="font-size:13px; background:#f8f8f8; padding:8px;">'
-                for i in range(max_lines):
-                    old_line = old_lines[i] if i < len(old_lines) else ''
-                    new_line = new_lines[i] if i < len(new_lines) else ''
-                    matcher = SequenceMatcher(None, old_line, new_line)
-                    new_out = ''
-                    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                        text = new_line[j1:j2]
-                        if tag == 'equal':
-                            new_out += text
-                        else:
-                            new_out += f'<span style="background-color:#ccffcc">{text}</span>' if text else ''
-                    html += f'<span style="color:#888">{i+1:>3} </span>{new_out}\n'
-                html += '</pre></div>'
-                html += '</div>'
+                            old_out += old_text
+                            new_out += new_text
+                        elif tag == 'replace' or tag == 'delete':
+                            old_out += f'<span style="background-color:#ffcccc">{old_text}</span>'
+                        if tag == 'replace' or tag == 'insert':
+                            new_out += f'<span style="background-color:#ccffcc">{new_text}</span>'
+                    html += f'<tr><td align="right">{i+1 if i < len(old_lines) else ""}</td><td>{old_out}</td><td align="right">{i+1 if i < len(new_lines) else ""}</td><td>{new_out}</td></tr>'
+                html += "</table>"
                 st.markdown(html, unsafe_allow_html=True)
                 # Show a summary of changed lines below
                 st.header("7. Changed Lines Summary")
                 diff = list(difflib.ndiff(old_lines, new_lines))
                 old_idx = 0
                 new_idx = 0
-                diff_lines = []
+                summary_rows = []
                 for line in diff:
                     marker = line[:2]
                     content = line[2:]
@@ -351,15 +362,26 @@ if old_file and new_file:
                         old_idx += 1
                         new_idx += 1
                     elif marker == '- ':
-                        diff_lines.append(f"Old {old_idx+1:>3} |     | - {content}")
+                        summary_rows.append((old_idx+1, '', content, '', 'background-color:#ffecec;'))
                         old_idx += 1
                     elif marker == '+ ':
-                        diff_lines.append(f"    | New {new_idx+1:>3} | + {content}")
+                        summary_rows.append(('', new_idx+1, '', content, 'background-color:#eaffea;'))
                         new_idx += 1
-                    elif marker == '? ':
-                        diff_lines.append(f"    |     | ? {content}")
-                if diff_lines:
-                    st.code('\n'.join(diff_lines), language="diff")
+                if summary_rows:
+                    html = (
+                        "<style>"
+                        ".diff-table { border-collapse: collapse; width: 100%; }"
+                        ".diff-table th, .diff-table td { border: 1px solid #ddd; padding: 4px 8px; font-size: 13px; }"
+                        ".diff-table th { background: #f4f4f4; }"
+                        ".diff-table td { vertical-align: top; font-family: monospace; }"
+                        "</style>"
+                        "<table class='diff-table'>"
+                        "<tr><th>Old Line</th><th>New Line</th><th>Old Content</th><th>New Content</th></tr>"
+                    )
+                    for old_line, new_line, old_content, new_content, style in summary_rows:
+                        html += f"<tr style='{style}'><td align='right'>{old_line}</td><td align='right'>{new_line}</td><td>{old_content}</td><td>{new_content}</td></tr>"
+                    html += "</table>"
+                    st.markdown(html, unsafe_allow_html=True)
                 else:
                     st.info("No differences found between old and new query.")
 else:
