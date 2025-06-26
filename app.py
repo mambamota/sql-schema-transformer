@@ -17,7 +17,7 @@ def extract_schema_from_excel(file, min_fields=1):
     For each sheet, finds the table name in the row where column A is 'Table Name',
     scanning all columns in that row (except column A) for the first non-empty cell.
     Extracts all column names from the 'Column Name' column in the 'Custom Fields' section.
-    Returns a dict: {table_name: [list of dicts, one per field, with keys from the header row]}
+    Returns a dict: {object_name: {'table_name': ..., 'fields': [...]}}
     """
     xls = pd.ExcelFile(file)
     schema = {}
@@ -59,7 +59,7 @@ def extract_schema_from_excel(file, min_fields=1):
                 field_info = {k.strip(): v.strip() for k, v in field_info.items()}
                 fields.append(field_info)
         if len(fields) >= min_fields:
-            schema[table_name.strip()] = fields
+            schema[sheet.strip()] = {'table_name': table_name.strip(), 'fields': fields}
     return schema
 
 def build_schema_dict(schema):
@@ -151,29 +151,40 @@ def map_columns_for_table(old_fields, new_fields):
         mapping[old_col] = best_new_col if best_score > 80 else old_col
     return mapping
 
-def build_full_mapping(query, old_schema, new_schema):
-    """
-    For all tables/columns used in the query, build a mapping from old to new.
-    Returns: table_map, {table: column_map}
-    """
-    used_tables, used_columns = extract_tables_and_columns_from_query(query)
-    old_tables = set(old_schema.keys())
-    new_tables = set(new_schema.keys())
-    # Map only tables that are both used and present in old schema
-    relevant_old_tables = used_tables & old_tables
-    table_map = map_tables(relevant_old_tables, new_tables)
+def find_best_object_for_table(table_name, columns_in_query, schema):
+    candidates = []
+    for object_name, obj_info in schema.items():
+        if obj_info['table_name'] == table_name:
+            object_columns = {f.get('Column Name') for f in obj_info['fields']}
+            overlap = len(set(columns_in_query) & object_columns)
+            candidates.append((object_name, overlap))
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    if candidates and candidates[0][1] > 0:
+        return candidates[0][0]  # object_name with most overlap
+    elif candidates:
+        return candidates[0][0]  # fallback: just pick the first
+    else:
+        return None
+
+def build_full_mapping_filtered(detected_table_columns, old_schema, new_schema):
+    relevant_old_tables = set(detected_table_columns.keys())
+    # Build a mapping from table_name to columns used in query
+    table_map = {}
     column_maps = {}
-    for old_table in relevant_old_tables:
-        new_table = table_map[old_table]
-        old_cols = set([f.get('Column Name') for f in old_schema[old_table] if f.get('Column Name')])
-        # Only map columns that are both used and present in old table
-        relevant_old_cols = used_columns & old_cols
-        if new_table in new_schema:
-            new_cols = set([f.get('Column Name') for f in new_schema[new_table] if f.get('Column Name')])
-            column_maps[old_table] = map_columns_for_table(relevant_old_cols, new_cols)
-        else:
-            column_maps[old_table] = {col: col for col in relevant_old_cols}
-    return table_map, column_maps, relevant_old_tables, used_columns
+    relevant_objects = set()
+    for table_name in relevant_old_tables:
+        columns_in_query = detected_table_columns[table_name]
+        old_object = find_best_object_for_table(table_name, columns_in_query, old_schema)
+        new_object = find_best_object_for_table(table_name, columns_in_query, new_schema)
+        if not old_object or not new_object:
+            continue
+        table_map[old_object] = new_object
+        relevant_objects.add(old_object)
+        # Get all old fields (dicts) for this object
+        old_fields = [f for f in old_schema[old_object]['fields'] if f.get('Column Name') and f.get('Column Name') in columns_in_query]
+        new_fields = [f for f in new_schema[new_object]['fields'] if f.get('Column Name')]
+        column_maps[old_object] = map_columns_for_table(old_fields, new_fields)
+    return table_map, column_maps, relevant_objects
 
 def transform_query_full(query, table_map, column_maps):
     """
@@ -243,22 +254,6 @@ if old_file and new_file:
             st.json(filtered_detected_table_columns)
             # Build mapping using only real tables
             # Patch build_full_mapping to use filtered_detected_table_columns
-            def build_full_mapping_filtered(detected_table_columns, old_schema, new_schema):
-                relevant_old_tables = set(detected_table_columns.keys())
-                old_tables = set(old_schema.keys())
-                new_tables = set(new_schema.keys())
-                table_map = map_tables(relevant_old_tables, new_tables)
-                column_maps = {}
-                for old_table in relevant_old_tables:
-                    new_table = table_map[old_table]
-                    # Get all old fields (dicts) for this table
-                    old_fields = [f for f in old_schema[old_table] if f.get('Column Name') and f.get('Column Name') in detected_table_columns[old_table]]
-                    if new_table in new_schema:
-                        new_fields = [f for f in new_schema[new_table] if f.get('Column Name')]
-                        column_maps[old_table] = map_columns_for_table(old_fields, new_fields)
-                    else:
-                        column_maps[old_table] = {f.get('Column Name'): f.get('Column Name') for f in old_fields if f.get('Column Name')}
-                return table_map, column_maps, relevant_old_tables
             table_map, column_maps, relevant_old_tables = build_full_mapping_filtered(filtered_detected_table_columns, old_schema, new_schema)
             st.write("#### Table Mapping:")
             st.json(table_map)
