@@ -5,9 +5,10 @@ from fuzzywuzzy import process
 import difflib
 from difflib import SequenceMatcher
 import sqlparse
+import re
 
 st.set_page_config(page_title="SQL Schema Transformer", layout="wide")
-st.title("SQL Query Schema Transformer")
+st.title("SQL Query Schema Transformer (Auto Table/Column Detection)")
 
 # --- Helper Functions ---
 def extract_schema_from_excel(file, min_fields=1):
@@ -42,42 +43,113 @@ def extract_schema_from_excel(file, min_fields=1):
             schema[sheet] = fields
     return schema
 
-def map_fields(old_fields, new_fields):
+def build_schema_dict(schema):
     """
-    Map old fields to new fields using fuzzy matching.
-    Returns a dict: {old_field: new_field}
+    Returns dict: {table: set(columns)} for easier lookup.
+    """
+    table_columns = {}
+    for table, fields in schema.items():
+        columns = set()
+        for f in fields:
+            col = f.get('Column Name')
+            if col:
+                columns.add(col)
+        table_columns[table] = columns
+    return table_columns
+
+def extract_tables_and_columns_from_query(query):
+    """
+    Use sqlparse and regex to extract all table and column names from the query.
+    Returns: (set of tables, set of columns)
+    """
+    # Use sqlparse to get identifiers
+    parsed = sqlparse.parse(query)
+    tables = set()
+    columns = set()
+    # Regex for table.column or just column
+    table_col_pattern = re.compile(r'([\w]+)\.([\w]+)')
+    col_pattern = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\b')
+    for stmt in parsed:
+        for token in stmt.tokens:
+            if token.ttype is None and hasattr(token, 'get_real_name'):
+                name = token.get_real_name()
+                if name:
+                    tables.add(name)
+            # Find table.column patterns
+            for match in table_col_pattern.finditer(str(token)):
+                tables.add(match.group(1))
+                columns.add(match.group(2))
+            # Find standalone columns (may include SQL keywords, filter later)
+            for match in col_pattern.finditer(str(token)):
+                columns.add(match.group(1))
+    # Remove SQL keywords from columns
+    sql_keywords = set([kw.upper() for kw in sqlparse.keywords.KEYWORDS.keys()])
+    columns = set([c for c in columns if c.upper() not in sql_keywords])
+    return tables, columns
+
+def map_tables(old_tables, new_tables):
+    """
+    Map old table names to new table names using fuzzy matching.
+    Returns dict: {old_table: new_table}
     """
     mapping = {}
-    for old in old_fields:
-        match, score = process.extractOne(old, new_fields)
-        mapping[old] = match if score > 80 else old  # Only map if high confidence
+    for old in old_tables:
+        match, score = process.extractOne(old, list(new_tables))
+        mapping[old] = match if score > 80 else old
     return mapping
 
-def transform_query(query, field_map, old_table, new_table):
+def map_columns_for_table(old_columns, new_columns):
     """
-    Replace old field and table names with new ones in the query.
+    Map old column names to new column names using fuzzy matching.
+    Returns dict: {old_col: new_col}
     """
-    # Replace table name
-    if old_table != new_table:
-        query = query.replace(old_table, new_table)
-    # Replace field names
-    for old_field, new_field in field_map.items():
-        if old_field != new_field:
-            query = query.replace(old_field, new_field)
-    return query
+    mapping = {}
+    for old in old_columns:
+        match, score = process.extractOne(old, list(new_columns))
+        mapping[old] = match if score > 80 else old
+    return mapping
 
-def extract_all_sheet_data(file):
+def build_full_mapping(query, old_schema, new_schema):
     """
-    Extracts all data from all sheets ending with '_c'.
-    Returns a dict: {sheet_name: DataFrame}
+    For all tables/columns used in the query, build a mapping from old to new.
+    Returns: table_map, {table: column_map}
     """
-    xls = pd.ExcelFile(file)
-    all_data = {}
-    for sheet in xls.sheet_names:
-        if sheet.endswith('_c'):
-            df = xls.parse(sheet, header=None)
-            all_data[sheet] = df
-    return all_data
+    used_tables, used_columns = extract_tables_and_columns_from_query(query)
+    old_tables = set(old_schema.keys())
+    new_tables = set(new_schema.keys())
+    # Map only tables that are both used and present in old schema
+    relevant_old_tables = used_tables & old_tables
+    table_map = map_tables(relevant_old_tables, new_tables)
+    column_maps = {}
+    for old_table in relevant_old_tables:
+        new_table = table_map[old_table]
+        old_cols = set([f.get('Column Name') for f in old_schema[old_table] if f.get('Column Name')])
+        # Only map columns that are both used and present in old table
+        relevant_old_cols = used_columns & old_cols
+        if new_table in new_schema:
+            new_cols = set([f.get('Column Name') for f in new_schema[new_table] if f.get('Column Name')])
+            column_maps[old_table] = map_columns_for_table(relevant_old_cols, new_cols)
+        else:
+            column_maps[old_table] = {col: col for col in relevant_old_cols}
+    return table_map, column_maps, relevant_old_tables, used_columns
+
+def transform_query_full(query, table_map, column_maps):
+    """
+    Replace old table and column names with new ones in the query.
+    """
+    # Replace table names first
+    for old_table, new_table in table_map.items():
+        if old_table != new_table:
+            query = re.sub(rf'\b{re.escape(old_table)}\b', new_table, query)
+    # Replace columns (qualified and unqualified)
+    for old_table, col_map in column_maps.items():
+        for old_col, new_col in col_map.items():
+            if old_col != new_col:
+                # Replace qualified: old_table.old_col
+                query = re.sub(rf'\b{re.escape(old_table)}\.{re.escape(old_col)}\b', f'{table_map[old_table]}.{new_col}', query)
+                # Replace unqualified: old_col (only if not part of another word)
+                query = re.sub(rf'\b{re.escape(old_col)}\b', new_col, query)
+    return query
 
 # --- Streamlit UI ---
 st.sidebar.header("1. Upload Schema Files")
@@ -88,124 +160,112 @@ if old_file and new_file:
     st.sidebar.success("Both files uploaded!")
     old_schema = extract_schema_from_excel(old_file)
     new_schema = extract_schema_from_excel(new_file)
-    old_all_data = extract_all_sheet_data(old_file)
-    new_all_data = extract_all_sheet_data(new_file)
     if not old_schema or not new_schema:
         st.error("Could not extract schema from one or both files. Check file format.")
     else:
         st.write("### Old Schema Tables:", list(old_schema.keys()))
         st.write("### New Schema Tables:", list(new_schema.keys()))
-        # Table selection
-        old_table = st.selectbox("Select OLD table (sheet)", list(old_schema.keys()))
-        new_table = st.selectbox("Select NEW table (sheet)", list(new_schema.keys()), index=0)
-        # Toggle for all data or just parsed fields
-        show_all_data = st.checkbox("Show ALL sheet data (not just Custom Fields)", value=False)
-        if show_all_data:
-            st.write(f"#### All Data for Old Table ({old_table}):")
-            st.dataframe(old_all_data[old_table])
-            st.write(f"#### All Data for New Table ({new_table}):")
-            st.dataframe(new_all_data[new_table])
-        else:
-            st.write(f"#### Old Fields ({old_table}):")
-            st.dataframe(pd.DataFrame(old_schema[old_table]))
-            st.write(f"#### New Fields ({new_table}):")
-            st.dataframe(pd.DataFrame(new_schema[new_table]))
-        # Field mapping (use 'Column Name' for mapping)
-        old_col_names = [f['Column Name'] for f in old_schema[old_table] if f.get('Column Name')]
-        new_col_names = [f['Column Name'] for f in new_schema[new_table] if f.get('Column Name')]
-        field_map = map_fields(old_col_names, new_col_names)
-        st.write("#### Field Mapping (Column Name):")
-        st.json(field_map)
-        # Add summary table of mapped columns
-        if field_map:
-            st.write("#### Column Mapping Summary:")
-            mapping_df = pd.DataFrame({
-                'Old Column Name': list(field_map.keys()),
-                'New Column Name': list(field_map.values())
-            })
-            st.dataframe(mapping_df)
-        # SQL input
         st.header("2. Paste Old SQL Query")
         old_query = st.text_area("Paste your old SQL query here:", height=200)
-        if st.button("Transform Query") and old_query.strip():
-            new_query = transform_query(old_query, field_map, old_table, new_table)
-            st.header("3. Transformed SQL Query")
-            st.code(new_query, language="sql")
-            st.download_button("Download New Query", new_query, file_name="transformed_query.sql")
-            # Side-by-side full queries with perfect formatting and syntax highlighting
-            st.header("5. Side-by-Side Full Queries (SQL Syntax Highlighting)")
-            formatted_old_query = sqlparse.format(old_query, reindent=True, keyword_case='upper')
-            formatted_new_query = sqlparse.format(new_query, reindent=True, keyword_case='upper')
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Old Query**")
-                st.code(formatted_old_query, language="sql")
-            with col2:
-                st.markdown("**New Query**")
-                st.code(formatted_new_query, language="sql")
-
-            # Custom HTML block with line numbers and inline color highlighting for differences
-            st.header("6. Side-by-Side Diff with Line Numbers and Highlighting")
-            old_lines = formatted_old_query.splitlines()
-            new_lines = formatted_new_query.splitlines()
-            max_lines = max(len(old_lines), len(new_lines))
-            html = '<div style="display: flex; gap: 32px;">'
-            # Old Query Column
-            html += '<div><b>Old Query</b><pre style="font-size:13px; background:#f8f8f8; padding:8px;">'
-            for i in range(max_lines):
-                old_line = old_lines[i] if i < len(old_lines) else ''
-                new_line = new_lines[i] if i < len(new_lines) else ''
-                matcher = SequenceMatcher(None, old_line, new_line)
-                old_out = ''
-                for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                    text = old_line[i1:i2]
-                    if tag == 'equal':
-                        old_out += text
-                    else:
-                        old_out += f'<span style="background-color:#ffcccc">{text}</span>' if text else ''
-                html += f'<span style="color:#888">{i+1:>3} </span>{old_out}\n'
-            html += '</pre></div>'
-            # New Query Column
-            html += '<div><b>New Query</b><pre style="font-size:13px; background:#f8f8f8; padding:8px;">'
-            for i in range(max_lines):
-                old_line = old_lines[i] if i < len(old_lines) else ''
-                new_line = new_lines[i] if i < len(new_lines) else ''
-                matcher = SequenceMatcher(None, old_line, new_line)
-                new_out = ''
-                for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                    text = new_line[j1:j2]
-                    if tag == 'equal':
-                        new_out += text
-                    else:
-                        new_out += f'<span style="background-color:#ccffcc">{text}</span>' if text else ''
-                html += f'<span style="color:#888">{i+1:>3} </span>{new_out}\n'
-            html += '</pre></div>'
-            html += '</div>'
-            st.markdown(html, unsafe_allow_html=True)
-
-            # Show a summary of changed lines below
-            st.header("7. Changed Lines Summary")
-            diff = list(difflib.ndiff(old_lines, new_lines))
-            old_idx = 0
-            new_idx = 0
-            diff_lines = []
-            for line in diff:
-                marker = line[:2]
-                content = line[2:]
-                if marker == '  ':
-                    old_idx += 1
-                    new_idx += 1
-                elif marker == '- ':
-                    diff_lines.append(f"Old {old_idx+1:>3} |     | - {content}")
-                    old_idx += 1
-                elif marker == '+ ':
-                    diff_lines.append(f"    | New {new_idx+1:>3} | + {content}")
-                    new_idx += 1
-                elif marker == '? ':
-                    diff_lines.append(f"    |     | ? {content}")
-            if diff_lines:
-                st.code('\n'.join(diff_lines), language="diff")
-            else:
-                st.info("No differences found between old and new query.")
+        if old_query.strip():
+            # Detect tables/columns used in query
+            used_tables, used_columns = extract_tables_and_columns_from_query(old_query)
+            st.write(f"#### Tables Detected in Query:")
+            st.json(list(used_tables))
+            st.write(f"#### Columns Detected in Query:")
+            st.json(list(used_columns))
+            # Build mapping
+            table_map, column_maps, relevant_old_tables, relevant_used_columns = build_full_mapping(old_query, old_schema, new_schema)
+            st.write("#### Table Mapping:")
+            st.json(table_map)
+            st.write("#### Column Mapping (per table):")
+            st.json(column_maps)
+            # Show mapping summary
+            for old_table in relevant_old_tables:
+                st.write(f"##### Mapping for Table: {old_table} → {table_map[old_table]}")
+                mapping_df = pd.DataFrame({
+                    'Old Column Name': list(column_maps[old_table].keys()),
+                    'New Column Name': list(column_maps[old_table].values())
+                })
+                st.dataframe(mapping_df)
+            # Transform query
+            if st.button("Transform Query"):
+                new_query = transform_query_full(old_query, table_map, column_maps)
+                st.header("3. Transformed SQL Query")
+                st.code(new_query, language="sql")
+                st.download_button("Download New Query", new_query, file_name="transformed_query.sql")
+                # Side-by-side full queries with perfect formatting and syntax highlighting
+                st.header("5. Side-by-Side Full Queries (SQL Syntax Highlighting)")
+                formatted_old_query = sqlparse.format(old_query, reindent=True, keyword_case='upper')
+                formatted_new_query = sqlparse.format(new_query, reindent=True, keyword_case='upper')
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**Old Query**")
+                    st.code(formatted_old_query, language="sql")
+                with col2:
+                    st.markdown("**New Query**")
+                    st.code(formatted_new_query, language="sql")
+                # Custom HTML block with line numbers and inline color highlighting for differences
+                st.header("6. Side-by-Side Diff with Line Numbers and Highlighting")
+                old_lines = formatted_old_query.splitlines()
+                new_lines = formatted_new_query.splitlines()
+                max_lines = max(len(old_lines), len(new_lines))
+                html = '<div style="display: flex; gap: 32px;">'
+                # Old Query Column
+                html += '<div><b>Old Query</b><pre style="font-size:13px; background:#f8f8f8; padding:8px;">'
+                for i in range(max_lines):
+                    old_line = old_lines[i] if i < len(old_lines) else ''
+                    new_line = new_lines[i] if i < len(new_lines) else ''
+                    matcher = SequenceMatcher(None, old_line, new_line)
+                    old_out = ''
+                    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                        text = old_line[i1:i2]
+                        if tag == 'equal':
+                            old_out += text
+                        else:
+                            old_out += f'<span style="background-color:#ffcccc">{text}</span>' if text else ''
+                    html += f'<span style="color:#888">{i+1:>3} </span>{old_out}\n'
+                html += '</pre></div>'
+                # New Query Column
+                html += '<div><b>New Query</b><pre style="font-size:13px; background:#f8f8f8; padding:8px;">'
+                for i in range(max_lines):
+                    old_line = old_lines[i] if i < len(old_lines) else ''
+                    new_line = new_lines[i] if i < len(new_lines) else ''
+                    matcher = SequenceMatcher(None, old_line, new_line)
+                    new_out = ''
+                    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                        text = new_line[j1:j2]
+                        if tag == 'equal':
+                            new_out += text
+                        else:
+                            new_out += f'<span style="background-color:#ccffcc">{text}</span>' if text else ''
+                    html += f'<span style="color:#888">{i+1:>3} </span>{new_out}\n'
+                html += '</pre></div>'
+                html += '</div>'
+                st.markdown(html, unsafe_allow_html=True)
+                # Show a summary of changed lines below
+                st.header("7. Changed Lines Summary")
+                diff = list(difflib.ndiff(old_lines, new_lines))
+                old_idx = 0
+                new_idx = 0
+                diff_lines = []
+                for line in diff:
+                    marker = line[:2]
+                    content = line[2:]
+                    if marker == '  ':
+                        old_idx += 1
+                        new_idx += 1
+                    elif marker == '- ':
+                        diff_lines.append(f"Old {old_idx+1:>3} |     | - {content}")
+                        old_idx += 1
+                    elif marker == '+ ':
+                        diff_lines.append(f"    | New {new_idx+1:>3} | + {content}")
+                        new_idx += 1
+                    elif marker == '? ':
+                        diff_lines.append(f"    |     | ? {content}")
+                if diff_lines:
+                    st.code('\n'.join(diff_lines), language="diff")
+                else:
+                    st.info("No differences found between old and new query.")
 else:
     st.info("Please upload both old and new schema Excel files to begin.") 
