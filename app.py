@@ -151,6 +151,30 @@ def transform_query_full(query, table_map, column_maps):
                 query = re.sub(rf'\b{re.escape(old_col)}\b', new_col, query)
     return query
 
+def extract_table_aliases_and_columns(query):
+    """
+    Extracts table/alias pairs and maps columns to their real tables from a SQL query.
+    Returns: {real_table: set(columns_used)}
+    """
+    # 1. Find all table/alias pairs in FROM and JOIN clauses
+    table_alias_pattern = re.compile(r'(FROM|JOIN)\s+([\w]+)\s+([\w]+)', re.IGNORECASE)
+    alias_to_table = {}
+    for match in table_alias_pattern.finditer(query):
+        real_table = match.group(2)
+        alias = match.group(3)
+        alias_to_table[alias] = real_table
+        alias_to_table[real_table] = real_table  # allow direct table usage too
+    # 2. Find all qualified column references (alias.column)
+    qualified_col_pattern = re.compile(r'([\w]+)\.([\w]+)')
+    table_columns = {}
+    for match in qualified_col_pattern.finditer(query):
+        alias = match.group(1)
+        col = match.group(2)
+        real_table = alias_to_table.get(alias)
+        if real_table:
+            table_columns.setdefault(real_table, set()).add(col)
+    return table_columns
+
 # --- Streamlit UI ---
 st.sidebar.header("1. Upload Schema Files")
 old_file = st.sidebar.file_uploader("Upload OLD schema Excel file", type=["xlsx"])
@@ -168,12 +192,10 @@ if old_file and new_file:
         st.header("2. Paste Old SQL Query")
         old_query = st.text_area("Paste your old SQL query here:", height=200)
         if old_query.strip():
-            # Detect tables/columns used in query
-            used_tables, used_columns = extract_tables_and_columns_from_query(old_query)
-            st.write(f"#### Tables Detected in Query:")
-            st.json(list(used_tables))
-            st.write(f"#### Columns Detected in Query:")
-            st.json(list(used_columns))
+            # Detect tables/columns used in query (robust alias-aware)
+            detected_table_columns = extract_table_aliases_and_columns(old_query)
+            st.write("#### Detected Tables and Columns (by robust alias extraction):")
+            st.json({k: list(v) for k, v in detected_table_columns.items()})
             # Build mapping
             table_map, column_maps, relevant_old_tables, relevant_used_columns = build_full_mapping(old_query, old_schema, new_schema)
             st.write("#### Table Mapping:")
