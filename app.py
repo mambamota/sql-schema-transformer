@@ -118,15 +118,37 @@ def map_tables(old_tables, new_tables):
         mapping[old] = match if score > 80 else old
     return mapping
 
-def map_columns_for_table(old_columns, new_columns):
+def map_columns_for_table(old_fields, new_fields):
     """
-    Map old column names to new column names using fuzzy matching.
+    Map old columns to new columns using fuzzy matching across 'Column Name', 'Name', and 'Display Name'.
+    old_fields and new_fields are lists of dicts (from schema extraction).
     Returns dict: {old_col: new_col}
     """
     mapping = {}
-    for old in old_columns:
-        match, score = process.extractOne(old, list(new_columns))
-        mapping[old] = match if score > 80 else old
+    # Build a list of (col_name, all_identifiers) for new fields
+    new_col_candidates = []
+    for nf in new_fields:
+        col_name = nf.get('Column Name', '').strip()
+        name = nf.get('Name', '').strip()
+        display_name = nf.get('Display Name', '').strip()
+        all_ids = [col_name, name, display_name]
+        new_col_candidates.append((col_name, all_ids))
+    for of in old_fields:
+        old_col = of.get('Column Name', '').strip()
+        old_name = of.get('Name', '').strip()
+        old_display_name = of.get('Display Name', '').strip()
+        old_ids = [old_col, old_name, old_display_name]
+        best_score = 0
+        best_new_col = old_col
+        for new_col, new_ids in new_col_candidates:
+            for oid in old_ids:
+                for nid in new_ids:
+                    if oid and nid:
+                        score = process.extractOne(oid, [nid])[1]
+                        if score > best_score:
+                            best_score = score
+                            best_new_col = new_col
+        mapping[old_col] = best_new_col if best_score > 80 else old_col
     return mapping
 
 def build_full_mapping(query, old_schema, new_schema):
@@ -229,14 +251,13 @@ if old_file and new_file:
                 column_maps = {}
                 for old_table in relevant_old_tables:
                     new_table = table_map[old_table]
-                    old_cols = set([f.get('Column Name') for f in old_schema[old_table] if f.get('Column Name')])
-                    # Only map columns that are both used and present in old table
-                    relevant_old_cols = set(detected_table_columns[old_table]) & old_cols
+                    # Get all old fields (dicts) for this table
+                    old_fields = [f for f in old_schema[old_table] if f.get('Column Name') and f.get('Column Name') in detected_table_columns[old_table]]
                     if new_table in new_schema:
-                        new_cols = set([f.get('Column Name') for f in new_schema[new_table] if f.get('Column Name')])
-                        column_maps[old_table] = map_columns_for_table(relevant_old_cols, new_cols)
+                        new_fields = [f for f in new_schema[new_table] if f.get('Column Name')]
+                        column_maps[old_table] = map_columns_for_table(old_fields, new_fields)
                     else:
-                        column_maps[old_table] = {col: col for col in relevant_old_cols}
+                        column_maps[old_table] = {f.get('Column Name'): f.get('Column Name') for f in old_fields if f.get('Column Name')}
                 return table_map, column_maps, relevant_old_tables
             table_map, column_maps, relevant_old_tables = build_full_mapping_filtered(filtered_detected_table_columns, old_schema, new_schema)
             st.write("#### Table Mapping:")
