@@ -14,8 +14,9 @@ st.title("SQL Query Schema Transformer (Auto Table/Column Detection)")
 def extract_schema_from_excel(file, min_fields=1):
     """
     Extracts schema info from all sheets ending with '_c'.
-    For each sheet, finds the table name in column E where column A is 'Table Name',
-    and extracts all column names from the 'Column Name' column in the 'Custom Fields' section.
+    For each sheet, finds the table name in the row where column A is 'Table Name',
+    scanning all columns in that row (except column A) for the first non-empty cell.
+    Extracts all column names from the 'Column Name' column in the 'Custom Fields' section.
     Returns a dict: {table_name: [list of dicts, one per field, with keys from the header row]}
     """
     xls = pd.ExcelFile(file)
@@ -24,11 +25,19 @@ def extract_schema_from_excel(file, min_fields=1):
         if not sheet.endswith('_c'):
             continue
         df = xls.parse(sheet, header=None)
-        # Find the table name: row where col 0 is 'Table Name', get col 4 (E)
+        # Find the table name: row where col 0 is 'Table Name', get first non-empty cell in that row (except col 0)
         table_name_row = df.index[df.iloc[:, 0].astype(str).str.strip() == 'Table Name']
         if len(table_name_row) == 0:
             continue
-        table_name = str(df.iloc[table_name_row[0], 4]).strip()
+        row_idx = table_name_row[0]
+        table_name = None
+        for col_idx in range(1, df.shape[1]):
+            cell = df.iloc[row_idx, col_idx]
+            if pd.notnull(cell) and str(cell).strip():
+                table_name = str(cell).strip()
+                break
+        if not table_name:
+            continue
         # Find the row where the first column is exactly 'Custom Fields'
         custom_fields_row_idx = df.index[df.iloc[:, 0].astype(str).str.strip() == 'Custom Fields']
         if len(custom_fields_row_idx) == 0:
@@ -205,10 +214,31 @@ if old_file and new_file:
         if old_query.strip():
             # Detect tables/columns used in query (robust alias-aware)
             detected_table_columns = extract_table_aliases_and_columns(old_query)
-            st.write("#### Detected Tables and Columns (by robust alias extraction):")
-            st.json(detected_table_columns)
-            # Build mapping
-            table_map, column_maps, relevant_old_tables, relevant_used_columns = build_full_mapping(old_query, old_schema, new_schema)
+            # Only keep tables that are present in the schema (real tables)
+            real_tables = set(old_schema.keys())
+            filtered_detected_table_columns = {k: v for k, v in detected_table_columns.items() if k in real_tables}
+            st.write("#### Detected Tables and Columns (by robust alias extraction, filtered to real tables):")
+            st.json(filtered_detected_table_columns)
+            # Build mapping using only real tables
+            # Patch build_full_mapping to use filtered_detected_table_columns
+            def build_full_mapping_filtered(detected_table_columns, old_schema, new_schema):
+                relevant_old_tables = set(detected_table_columns.keys())
+                old_tables = set(old_schema.keys())
+                new_tables = set(new_schema.keys())
+                table_map = map_tables(relevant_old_tables, new_tables)
+                column_maps = {}
+                for old_table in relevant_old_tables:
+                    new_table = table_map[old_table]
+                    old_cols = set([f.get('Column Name') for f in old_schema[old_table] if f.get('Column Name')])
+                    # Only map columns that are both used and present in old table
+                    relevant_old_cols = set(detected_table_columns[old_table]) & old_cols
+                    if new_table in new_schema:
+                        new_cols = set([f.get('Column Name') for f in new_schema[new_table] if f.get('Column Name')])
+                        column_maps[old_table] = map_columns_for_table(relevant_old_cols, new_cols)
+                    else:
+                        column_maps[old_table] = {col: col for col in relevant_old_cols}
+                return table_map, column_maps, relevant_old_tables
+            table_map, column_maps, relevant_old_tables = build_full_mapping_filtered(filtered_detected_table_columns, old_schema, new_schema)
             st.write("#### Table Mapping:")
             st.json(table_map)
             st.write("#### Column Mapping (per table):")
