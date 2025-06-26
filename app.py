@@ -14,7 +14,9 @@ st.title("SQL Query Schema Transformer (Auto Table/Column Detection)")
 def extract_schema_from_excel(file, min_fields=1):
     """
     Extracts schema info from all sheets ending with '_c'.
-    Returns a dict: {sheet_name: [list of dicts, one per field, with keys from the header row]}
+    For each sheet, finds the table name in column E where column A is 'Table Name',
+    and extracts all column names from the 'Column Name' column in the 'Custom Fields' section.
+    Returns a dict: {table_name: [list of dicts, one per field, with keys from the header row]}
     """
     xls = pd.ExcelFile(file)
     schema = {}
@@ -22,6 +24,11 @@ def extract_schema_from_excel(file, min_fields=1):
         if not sheet.endswith('_c'):
             continue
         df = xls.parse(sheet, header=None)
+        # Find the table name: row where col 0 is 'Table Name', get col 4 (E)
+        table_name_row = df.index[df.iloc[:, 0].astype(str).str.strip() == 'Table Name']
+        if len(table_name_row) == 0:
+            continue
+        table_name = str(df.iloc[table_name_row[0], 4]).strip()
         # Find the row where the first column is exactly 'Custom Fields'
         custom_fields_row_idx = df.index[df.iloc[:, 0].astype(str).str.strip() == 'Custom Fields']
         if len(custom_fields_row_idx) == 0:
@@ -37,10 +44,10 @@ def extract_schema_from_excel(file, min_fields=1):
             if row.isnull().all() or (row.astype(str) == '').all():
                 break
             field_info = {header[j]: str(row.iloc[j]).strip() for j in range(min(len(header), len(row)))}
-            if field_info.get(header[0]):  # Only add if first column (Name) is not empty
+            if field_info.get('Column Name'):  # Only add if 'Column Name' is not empty
                 fields.append(field_info)
         if len(fields) >= min_fields:
-            schema[sheet] = fields
+            schema[table_name] = fields
     return schema
 
 def build_schema_dict(schema):
