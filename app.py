@@ -204,20 +204,29 @@ def transform_query_full(query, table_map, column_maps):
                 query = re.sub(rf'\b{re.escape(old_col)}\b', new_col, query)
     return query
 
-def extract_table_aliases_and_columns(query):
+def extract_table_aliases_and_columns(query, schema):
     """
-    Extracts table/alias pairs and maps columns to their real tables from a SQL query.
-    Trims whitespace from all names. Returns: {real_table: set(columns_used)}
+    Extracts table/alias pairs and maps columns to their real tables from a SQL query, only for real tables in the schema (ignores CTEs).
+    Returns: {real_table: set(columns_used)}
     """
-    # 1. Find all table/alias pairs in FROM and JOIN clauses
+    # Find all FROM/JOIN ... <table> <alias> patterns
     table_alias_pattern = re.compile(r'(FROM|JOIN)\s+([\w]+)\s+([\w]+)', re.IGNORECASE)
     alias_to_table = {}
+    real_table_names = {obj['table_name'] for obj in schema.values()}
     for match in table_alias_pattern.finditer(query):
         real_table = match.group(2).strip()
         alias = match.group(3).strip()
-        alias_to_table[alias] = real_table
-        alias_to_table[real_table] = real_table  # allow direct table usage too
-    # 2. Find all qualified column references (alias.column)
+        # Only keep if real_table is in schema (ignore CTEs)
+        if real_table in real_table_names:
+            alias_to_table[alias] = real_table
+            alias_to_table[real_table] = real_table  # allow direct table usage too
+    # Also handle FROM ... <table> (no alias)
+    table_pattern = re.compile(r'(FROM|JOIN)\s+([\w]+)(?!\s+AS)', re.IGNORECASE)
+    for match in table_pattern.finditer(query):
+        real_table = match.group(2).strip()
+        if real_table in real_table_names:
+            alias_to_table[real_table] = real_table
+    # Find all qualified column references (alias.column)
     qualified_col_pattern = re.compile(r'([\w]+)\.([\w]+)')
     table_columns = {}
     for match in qualified_col_pattern.finditer(query):
@@ -245,15 +254,14 @@ if old_file and new_file:
         st.header("2. Paste Old SQL Query")
         old_query = st.text_area("Paste your old SQL query here:", height=200)
         if old_query.strip():
-            # Detect tables/columns used in query (robust alias-aware)
-            detected_table_columns = extract_table_aliases_and_columns(old_query)
+            # Detect tables/columns used in query (robust alias-aware, only real tables)
+            detected_table_columns = extract_table_aliases_and_columns(old_query, old_schema)
             # Only keep tables that are present in the schema (real tables)
-            real_tables = set(old_schema.keys())
+            real_tables = {obj['table_name'] for obj in old_schema.values()}
             filtered_detected_table_columns = {k: v for k, v in detected_table_columns.items() if k in real_tables}
             st.write("#### Detected Tables and Columns (by robust alias extraction, filtered to real tables):")
             st.json(filtered_detected_table_columns)
             # Build mapping using only real tables
-            # Patch build_full_mapping to use filtered_detected_table_columns
             table_map, column_maps, relevant_old_tables = build_full_mapping_filtered(filtered_detected_table_columns, old_schema, new_schema)
             st.write("#### Table Mapping:")
             st.json(table_map)
